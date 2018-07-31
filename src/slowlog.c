@@ -41,7 +41,7 @@
 
 #include "server.h"
 #include "slowlog.h"
-
+extern void nolocks_localtime(struct tm *tmp, time_t t, time_t tz, int dst);
 /* Create a new slowlog entry.
  * Incrementing the ref count of all the objects retained is up to
  * this function. */
@@ -142,7 +142,7 @@ void slowlogReset(void) {
 void slowlogCommand(client *c) {
     if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"help")) {
         const char *help[] = {
-"GET [count] -- Return top entries from the slowlog (default: 10)."
+"GET [count] [human-readable-time] -- Return top entries from the slowlog (default: 10)."
 "    Entries are made of:",
 "    id, timestamp, time in microseconds, arguments array, client IP and port, client name",
 "LEN -- Return the length of the slowlog.",
@@ -155,18 +155,35 @@ NULL
         addReply(c,shared.ok);
     } else if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"len")) {
         addReplyLongLong(c,listLength(server.slowlog));
-    } else if ((c->argc == 2 || c->argc == 3) &&
+    } else if ((c->argc > 1 && c->argc < 5) &&
                !strcasecmp(c->argv[1]->ptr,"get"))
     {
         long count = 10, sent = 0;
+        int human_readable_time = 0;
+        struct tm tm;
+        char buf[64];
+        size_t off;
         listIter li;
         void *totentries;
         listNode *ln;
         slowlogEntry *se;
 
-        if (c->argc == 3 &&
-            getLongFromObjectOrReply(c,c->argv[2],&count,NULL) != C_OK)
-            return;
+        if (c->argc == 3) {
+            if (!strcasecmp(c->argv[2]->ptr, "human-readable-time")) {
+                human_readable_time = 1;
+            } else if (getLongFromObjectOrReply(c,c->argv[2],&count,NULL) != C_OK) {
+                return;
+            }
+        } else if (c->argc == 4) {
+            if (getLongFromObjectOrReply(c,c->argv[2],&count,NULL) != C_OK) {
+                return;
+            } else if (!strcasecmp(c->argv[3]->ptr, "human-readable-time")) {
+                human_readable_time = 1;
+            } else {
+                addReplySubcommandSyntaxError(c);
+                return;
+            }
+        }
 
         listRewind(server.slowlog,&li);
         totentries = addDeferredMultiBulkLength(c);
@@ -176,7 +193,13 @@ NULL
             se = ln->value;
             addReplyMultiBulkLen(c,6);
             addReplyLongLong(c,se->id);
-            addReplyLongLong(c,se->time);
+            if (!human_readable_time) {
+                addReplyLongLong(c,se->time);
+            } else {
+                nolocks_localtime(&tm, se->time, server.timezone, server.daylight_active);
+                off = strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+                addReplyBulkCBuffer(c, buf, off);
+            }
             addReplyLongLong(c,se->duration);
             addReplyMultiBulkLen(c,se->argc);
             for (j = 0; j < se->argc; j++)

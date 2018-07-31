@@ -35,6 +35,7 @@
 
 #include "server.h"
 
+extern void nolocks_localtime(struct tm *tmp, time_t t, time_t tz, int dst);
 /* Dictionary type for latency events. */
 int dictStringKeyCompare(void *privdata, const void *key1, const void *key2) {
     UNUSED(privdata);
@@ -478,13 +479,26 @@ sds createLatencyReport(void) {
 void latencyCommandReplyWithSamples(client *c, struct latencyTimeSeries *ts) {
     void *replylen = addDeferredMultiBulkLength(c);
     int samples = 0, j;
+    char buf[64];
+    struct tm tm;
+    size_t offset = 0;
+    int human_readable_time = 0;
+
+    if (c->argc == 4 && !strcasecmp(c->argv[3]->ptr, "human-readable-time"))
+        human_readable_time = 1;
 
     for (j = 0; j < LATENCY_TS_LEN; j++) {
         int i = (ts->idx + j) % LATENCY_TS_LEN;
 
         if (ts->samples[i].time == 0) continue;
         addReplyMultiBulkLen(c,2);
-        addReplyLongLong(c,ts->samples[i].time);
+        if (!human_readable_time) {
+            addReplyLongLong(c,ts->samples[i].time);
+        } else {
+            nolocks_localtime(&tm, ts->samples[i].time, server.timezone, server.daylight_active);
+            offset = strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+            addReplyBulkCBuffer(c, buf, offset);
+        }
         addReplyLongLong(c,ts->samples[i].latency);
         samples++;
     }
@@ -496,6 +510,13 @@ void latencyCommandReplyWithSamples(client *c, struct latencyTimeSeries *ts) {
 void latencyCommandReplyWithLatestEvents(client *c) {
     dictIterator *di;
     dictEntry *de;
+    char buf[64];
+    struct tm tm;
+    off_t offset;
+    int human_readable_time = 0;
+
+    if (c->argc == 3 && !strcasecmp(c->argv[2]->ptr, "human-readable-time"))
+        human_readable_time = 1;
 
     addReplyMultiBulkLen(c,dictSize(server.latency_events));
     di = dictGetIterator(server.latency_events);
@@ -506,7 +527,13 @@ void latencyCommandReplyWithLatestEvents(client *c) {
 
         addReplyMultiBulkLen(c,4);
         addReplyBulkCString(c,event);
-        addReplyLongLong(c,ts->samples[last].time);
+        if (!human_readable_time) {
+            addReplyLongLong(c,ts->samples[last].time);
+        } else {
+            nolocks_localtime(&tm, ts->samples[last].time, server.timezone, server.daylight_active);
+            offset = strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+            addReplyBulkCBuffer(c, buf, offset);
+        }
         addReplyLongLong(c,ts->samples[last].latency);
         addReplyLongLong(c,ts->max);
     }
@@ -568,7 +595,7 @@ sds latencyCommandGenSparkeline(char *event, struct latencyTimeSeries *ts) {
 void latencyCommand(client *c) {
     struct latencyTimeSeries *ts;
 
-    if (!strcasecmp(c->argv[1]->ptr,"history") && c->argc == 3) {
+    if (!strcasecmp(c->argv[1]->ptr,"history") && (c->argc == 3 || c->argc == 4)) {
         /* LATENCY HISTORY <event> */
         ts = dictFetchValue(server.latency_events,c->argv[2]->ptr);
         if (ts == NULL) {
@@ -590,7 +617,7 @@ void latencyCommand(client *c) {
         graph = latencyCommandGenSparkeline(event,ts);
         addReplyBulkCString(c,graph);
         sdsfree(graph);
-    } else if (!strcasecmp(c->argv[1]->ptr,"latest") && c->argc == 2) {
+    } else if (!strcasecmp(c->argv[1]->ptr,"latest") && (c->argc == 2 || c->argc == 3)) {
         /* LATENCY LATEST */
         latencyCommandReplyWithLatestEvents(c);
     } else if (!strcasecmp(c->argv[1]->ptr,"doctor") && c->argc == 2) {
